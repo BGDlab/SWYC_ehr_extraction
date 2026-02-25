@@ -641,7 +641,7 @@ ggsave("results/SWYC/development_prob.png")
 ggplot(qforms.swyc.indiv, aes(x = devo.quotient)) +
   geom_histogram() +
   geom_vline(xintercept = mean(qforms.swyc.indiv$devo.quotient),
-             linetype = "dashed", color = "red")
+             linetype = "dashed", color = "red") +
   theme_pubclean() +
   labs(title = "Distribution of Developmental Quotient (DQ)") +
 ggsave("results/SWYC/development_quotient.png")
