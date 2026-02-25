@@ -4,3 +4,4 @@ queries/*
 *_files/
 defunct/
 .ipynb_checkpoints/
+*.pdf
