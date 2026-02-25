@@ -14,7 +14,7 @@ The standard clinical application of the Survey of Well-being of Young Children 
 
 To address this, this pipeline implements the continuous normative scoring methodology developed by Sheldrick et al. (2019) Using Item Response Theory (IRT), specifically a Graded Response Model, this approach translates raw SWYC item responses into continuous, age-standardized metrics.
 
-**Key advantages and outputs of this methodology include:**
+**Key outputs of this methodology include:**
 
 -   **Developmental Age Estimation:** Rather than simply summing a score, this method uses established logistic curves to calculate the probability of a child's specific combination of responses across a continuous theoretical age range (0–72 months). The age at which the joint probability of their answers peaks is calculated as their **Developmental Age**.
 -   **Developmental Quotient (DQ):** By dividing the computed Developmental Age by the child's chronological age, we derive the DQ. This provides a standardized, continuous metric (ideally centered around 1.0) that quantifies a child's developmental progression relative to normative expectations.
@@ -45,6 +45,7 @@ library(knitr)
 library(kableExtra)
 library(ggpubr)
 library(data.table)
+library(dtplyr)
 ```
 
 ### Authenticate Lab in SQL Big Query
@@ -238,6 +239,7 @@ qforms.swyc.counts <- qforms.swyc %>%
                                Count = n)
 
 kable(qforms.swyc.counts)
+rm(qforms.swyc.counts)
 ```
 
 Now let's check to see if a given form was clinically appropriate based on the child's adjusted age range at the time of the encounter.
@@ -248,7 +250,7 @@ swyc_grader <- read_csv("data/SWYC_norms/SWYC_scores.csv", show_col_types = FALS
 
 # Join the official thresholds and forms to the actual data
 qforms.swyc <- left_join(qforms.swyc, swyc_grader, by = c("clin.age" = "Age")) 
-
+rm(swyc_grader)
 # Check for individuals who may have received the wrong form.
 qforms.swyc %>%
     mutate(correct_swyc = form_friendly_name == Form) %>%
@@ -346,7 +348,7 @@ response.rate <- qforms.swyc %>%
                                 values_fn = function(x) sum(!is.na(x)), values_fill = 0)
 
 kable(response.rate, caption = "Responses by SWYC")
-
+rm(response.rate)
 ```
 
 We tend to have a slight drop-off in the later questions on the forms, indicating survey fatigue, but nothing severe enough to bias the IRT estimates.
@@ -387,6 +389,7 @@ indiv_quests <- qforms.swyc.questions %>%
                   count(quest_text)
 
 kable(indiv_quests, caption = "Number of Responses per Question")
+rm(indiv_quests)
 ```
 
 ### Calculate Developmental Quotient
@@ -403,6 +406,7 @@ sheldrick_norms <- sheldrick_norms[!is.na(sheldrick_norms$`SWYC Milestone Text`)
 # Merge the IRT parameters onto the patient responses based on the question text
 qforms.swyc.questions <- merge(qforms.swyc.questions,sheldrick_norms,
                               by.x = "quest_text", by.y = "SWYC Milestone Text")
+rm(sheldrick_norms)
 
 # Recode responses from EHR format (1-3) to Sheldrick format (0 = Not Yet, 1 = Somewhat, 2 = Very Much)
 qforms.swyc.questions$numeric_answer <- qforms.swyc.questions$numeric_answer - 1
@@ -473,6 +477,8 @@ sim_imperfect_response <- function(j, df) {
 
 ```{r}
 #| output: false
+rm(response_summary, qforms.swyc)
+gc()
 
 library(parallel)
 
@@ -480,17 +486,36 @@ if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
   qforms.swyc.indiv <- read_csv("results/SWYC/individual_development_scores.csv", 
                                 show_col_types = FALSE)
 } else {
-  qforms.swyc.indiv <- qforms.swyc.questions %>%
+  # Get data table of subjects
+  qforms.swyc.indiv <- lazy_dt(qforms.swyc.questions) %>%
                          dplyr::select(c(pat_id,encounter_id,form_friendly_name, norm.age)) %>%
-                         distinct()
-    
-  qforms.swyc.indiv$devo.age      <- NA
-  qforms.swyc.indiv$devo.prob     <- NA
-  qforms.swyc.indiv$devo.quotient <- NA
-  qforms.swyc.indiv$n_answers     <- NA
-  qforms.swyc.indiv$sum_answers   <- NA
-  qforms.swyc.indiv$all_0s        <- FALSE
-  qforms.swyc.indiv$all_2s        <- FALSE
+                        mutate(devo.age = NA,
+                               devo.prob = NA) %>%
+                        distinct() %>%
+                        as.data.table()
+  
+  # Reduce data table of question responses for efficiency
+  qforms.swyc.questions <- lazy_dt(qforms.swyc.questions) %>%
+                                  select(encounter_id, form_friendly_name, norm.age, numeric_answer, 
+                                         beta, alpha1, alpha2, starts_with("prob.")) %>%
+                                  drop_na() %>%
+                                  as.data.table()
+  
+  # Record QA data and check for boundary_conditions
+  response_summary <- lazy_dt(qforms.swyc.questions) %>%
+                         dplyr::select(c(encounter_id,form_friendly_name, norm.age, numeric_answer)) %>%
+                         na.omit() %>%
+                         group_by(encounter_id, form_friendly_name, norm.age) %>%
+                         summarize(n_answers = n(),
+                                all_0s = all(numeric_answer == 0),
+                                all_2s = all(numeric_answer == 2),
+                                sum_answers = sum(numeric_answer)) %>%
+                        as.data.table()
+  
+  qforms.swyc.indiv <- lazy_dt(qforms.swyc.indiv) %>%
+                          left_join(response_summary) %>%
+                          as.data.table()
+  
   
   # Loop through each clinical encounter and find the maximum of the probability curve
   it_max <- nrow(qforms.swyc.indiv)
@@ -499,15 +524,12 @@ if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
   
   for (i in 1:it_max) {
     # Subset data to include only rows that belong to the current patient visit
-    qforms.ind <- qforms.swyc.questions %>%
-                    drop_na() %>%
-                    filter(pat_id             == qforms.swyc.indiv$pat_id[i] &
-                           encounter_id       == qforms.swyc.indiv$encounter_id[i] &
+    qforms.ind <- lazy_dt(qforms.swyc.questions) %>%
+                    filter(encounter_id       == qforms.swyc.indiv$encounter_id[i] &
                            form_friendly_name == qforms.swyc.indiv$form_friendly_name[i] &
-                           norm.age           == qforms.swyc.indiv$norm.age[i])
-    
-    # Record QA data
-    qforms.swyc.indiv$n_answers[i] <- nrow(qforms.ind)
+                           norm.age           == qforms.swyc.indiv$norm.age[i]) %>%
+                    select(beta, alpha1, alpha2, starts_with("prob.")) %>%
+                    as.data.table()
     
     # Skip encounters with insufficient data to estimate a curve
     if(nrow(qforms.ind) < 5) {
@@ -515,14 +537,9 @@ if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
     # Resolve duplicates: take the form with the highest completion rate
     } else if (length(qforms.ind$form_section_friendly_name) > 1) {
       qforms.ind <- qforms.ind %>%
-        filter(form_section_friendly_name == 
-                      names(which.max(table(form_section_friendly_name))))
+                        filter(form_section_friendly_name == 
+                                names(which.max(table(form_section_friendly_name))))
     }
-    
-    # Check for boundary conditions (all 0s or all 2s)
-    qforms.swyc.indiv$all_0s[i]      <- all(qforms.ind$numeric_answer == 0)
-    qforms.swyc.indiv$all_2s[i]      <- all(qforms.ind$numeric_answer == 2)
-    qforms.swyc.indiv$sum_answers[i] <- sum(qforms.ind$numeric_answer)
     
     # Standard Maximum Likelihood Estimation
     if (!(qforms.swyc.indiv$all_0s[i] | qforms.swyc.indiv$all_2s[i])) {
@@ -535,19 +552,19 @@ if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
       
     } else {
       # Boundary Condition Execution: Simulate imperfect responses using parallel processing
-      sim_responses <- mcmapply(sim_imperfect_response, 1:nrow(qforms.ind), MoreArgs = list(df = qforms.ind), mc.cores = 10)
-      sim_responses <- as_tibble(t(sim_responses)) %>% unnest(cols = c(devo.prob, devo.age))
-      
+      sim_responses <- mcmapply(sim_imperfect_response, 1:nrow(qforms.ind), MoreArgs = list(df = qforms.ind), 
+                                mc.cores = parallelly::availableCores())
+      # Apply age adjustment to place the developmental age just outside the realm of possible responses 
       if (qforms.swyc.indiv$all_0s[i]) {
         # Set devo.age to the lowest possible age - 1
-        qforms.swyc.indiv$devo.age[i] <- min(sim_responses$devo.age, na.rm = T) - 1
-        qforms.swyc.indiv$devo.prob[i] <- max(sim_responses$devo.prob[sim_responses$devo.age == qforms.swyc.indiv$devo.age[i] + 1], 
-                                              na.rm = T)
+        min.ind <- which.min(unlist(sim_responses["devo.age",]))
+        qforms.swyc.indiv$devo.age[i] <- sim_responses["devo.age",min.ind]$devo.age - 1
+        qforms.swyc.indiv$devo.prob[i] <- sim_responses["devo.prob",min.ind]$devo.prob
       } else if (qforms.swyc.indiv$all_2s[i]) { 
         # Set devo.age to the highest possible age + 1
-        qforms.swyc.indiv$devo.age[i] <- max(sim_responses$devo.age, na.rm = T) + 1
-        qforms.swyc.indiv$devo.prob[i] <- max(sim_responses$devo.prob[sim_responses$devo.age == qforms.swyc.indiv$devo.age[i] - 1], 
-                                              na.rm = T)
+        max.ind <- which.max(unlist(sim_responses["devo.age",]))
+        qforms.swyc.indiv$devo.age[i] <- sim_responses["devo.age",max.ind]$devo.age + 1
+        qforms.swyc.indiv$devo.prob[i] <- sim_responses["devo.prob",max.ind]$devo.prob
       }
     }
 
@@ -555,7 +572,9 @@ if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
   }
   
   # Calculate final Developmental Quotient (DQ)
-  qforms.swyc.indiv$devo.quotient <- qforms.swyc.indiv$devo.age/qforms.swyc.indiv$norm.age
+  qforms.swyc.indiv <- qforms.swyc.indiv %>%
+                          mutate(devo.quotient = devo.age/norm.age) %>%
+                          as_tibble()
   
   write_csv(qforms.swyc.indiv,"results/SWYC/individual_development_scores.csv")
 }
@@ -624,7 +643,7 @@ ggplot(qforms.swyc.indiv, aes(x = devo.quotient)) +
   geom_vline(xintercept = mean(qforms.swyc.indiv$devo.quotient),
              linetype = "dashed", color = "red")
   theme_pubclean() +
-  labs(title = "Distribution of Developmental Quotient (DQ)")
+  labs(title = "Distribution of Developmental Quotient (DQ)") +
 ggsave("results/SWYC/development_quotient.png")
 ```
 
