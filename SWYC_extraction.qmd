@@ -38,6 +38,7 @@ print(getwd())
 ```{r, warning=FALSE, message=FALSE}
 #| output: false
 rm(list = ls())
+pipeline_start <- Sys.time()
 library(ggplot2)
 library(tidyverse)
 library(stringr)
@@ -56,10 +57,29 @@ bq_auth()
 project_id <- if (exists('project_id')) project_id else bq_projects()[1]
 ```
 
+```{r identify Arcus lab version}
+table_query <- "SELECT * FROM arcus.version"
+# pull data based on above sql query
+arcus_version <- bq_table_download(bq_project_query(project_id,table_query)) 
+print(arcus_version$citation)
+```
+
 There are certain time-consuming aspects of the pipeline that you may not want to rerun. If you have already run the pipeline before, you can set restart = FALSE to reuse files.
 
 ```{r}
 restart <- TRUE
+```
+
+## Encounter List (Optional)
+
+You may optionally provide a encounter file with Arcus pat_ids. These encounters will be the only ones processed
+
+```{r read in patients to test}
+enc_file <- NA
+if (is.character(enc_file)) {
+  encs <- read_csv(file=enc_file)
+  dim(encs)
+}
 ```
 
 ## Download and Clean SWYC Codes
@@ -108,6 +128,9 @@ if (file.exists(file) & !restart) {
 
   
   qforms.swyc <- bq_table_download(bq_project_query(project_id, table_query))
+  if (is.character(enc_file)) {
+    qforms.swyc <- qforms.swyc %>% filter(encounter_id %in% encs$encounter_id) 
+  }
     
   write_csv(qforms.swyc,file)
 }
@@ -131,8 +154,10 @@ qforms.swyc <- qforms.swyc %>%
                             # If >= 3 weeks early AND under 24 months, subtract the prematurity in months (weeks/4.35)
                             weeks_premature >= 3 & norm.age < 24 ~ norm.age - weeks_premature/4.35,
                             .default = norm.age)) %>%
-                  mutate(norm.age = floor(norm.age),
+                  mutate(norm.age = round(norm.age),
                          clin.age = floor(clin.age),)
+
+# NOTE: There is ambiguity as to whether the developmental quotient should be calculated based on the floored age in months or the rounded age in months. Sheldrick et al. (2019) does not specify. Floor is more consistent with the way the SWYC is administered, but rounded preserves more information. In this approach we use rounded age.
 
 qforms.swyc %>% 
   mutate(born_premature = weeks_premature >= 3) %>% 
@@ -148,6 +173,11 @@ Questionnaire names in the EHR are often inconsistently formatted. Here, we stan
 
 ```{r}
 library(stringr)
+
+
+# Exclude form form_friendly_name includes "Baby", "Preschool", or "Family Questions" ignoring case to cover any inconsistencies 
+qforms.swyc <- qforms.swyc %>% filter(!grepl("Baby|Preschool|Family Questions", form_friendly_name, ignore.case = TRUE))
+
 qforms.swyc <- qforms.swyc %>%
         # Remove trailing age brackets and standardize 'month' casing
         mutate(form_friendly_name = str_replace_all(form_friendly_name, " \\(\\d*\\)", "")) %>%
@@ -160,39 +190,46 @@ qforms.swyc <- qforms.swyc %>%
                               "Survey of Well-being of Young Children: ",
                               "SWYC ")) %>%  
         
+        # Remove remaining parentheses and colon
+        mutate(form_friendly_name = str_replace_all(form_friendly_name, "[()]", "")) %>%
+        mutate(form_friendly_name = str_replace_all(form_friendly_name, ":", "")) %>%
+  
         # Map specific EHR form names to the standardized SWYC target age buckets
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
-                              "Developmental Milestones \\(4 Month\\)",
+                              "Developmental Milestones (4) Month",
                               "Developmental Milestones: 4 Month")) %>% 
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
-                              "Developmental Milestones \\((6|7|8) Month\\)",
+                              "Developmental Milestones (6|7|8) Month",
                               "Developmental Milestones: 6 Month")) %>% 
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
-                              "Developmental Milestones \\((9|10|11) Month\\)",
+                              "Developmental Milestones (9|10|11) Month",
                               "Developmental Milestones: 9 Month")) %>% 
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
-                              "Developmental Milestones \\((12|13|14) Month\\)",
+                              "Developmental Milestones (12|13|14) Month",
                               "Developmental Milestones: 12 Month")) %>%
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
-                              "Developmental Milestones \\((15|16) Month\\)",
+                              "Developmental Milestones (15|16) Month",
                               "Developmental Milestones: 15 Month")) %>% 
+        # JLC added 20 and 21
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
-                              "Developmental Milestones \\((17|18|19|22) Month\\)",
-                              "Developmental Milestones: 18 Month")) %>%   
+                              "Developmental Milestones (17|18|19|20|21|22) Month",
+                              "Developmental Milestones: 18 Month")) %>%  
+        # JLC added 23,25,27
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
-                              "Developmental Milestones \\((24|26) Month\\)",
+                              "Developmental Milestones (23|24|25|26|27) Month",
                               "Developmental Milestones: 24 Month")) %>% 
+        # JLC added 31 and 33
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
-                              "Developmental Milestones \\((29|30|34) Month\\)",
+                              "Developmental Milestones (29|30|31|32|33|34) Month",
                               "Developmental Milestones: 30 Month")) %>% 
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
-                              "Developmental Milestones \\((35|36|46) Month\\)",
+                              "Developmental Milestones (35|36|37|38|39|40|41|42|43|44|45|46) Month",
                               "Developmental Milestones: 36 Month")) %>% 
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
-                              "Developmental Milestones \\((48|49) Month\\)",
-                              "Developmental Milestones: 48 Month")) %>% 
+                              "Developmental Milestones (48|49|50|51|52|53|54|55|56|57|58) Month",
+                              "Developmental Milestones: 48 Month")) %>%
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
-                              "Developmental Milestones \\(60 Month\\)",
+                              "Developmental Milestones (60|61|62|63) Month",
                               "Developmental Milestones: 60 Month")) %>%
         
         # Final cleanup for zero-padding single digits to ensure proper sorting later
@@ -204,6 +241,9 @@ qforms.swyc <- qforms.swyc %>%
                                     ": 6 Month", ": 06 Month")) %>%
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
                                     ": 9 Month", ": 09 Month"))
+
+# Remove 2 month SWYCs
+qforms.swyc <- qforms.swyc %>% filter(form_friendly_name != "SWYC : 2 Month")
 
 # Print counts of each SWYC assessment
 qforms.swyc.counts <- qforms.swyc %>%
@@ -262,7 +302,9 @@ qforms.swyc %>%
 In SCIT-605, about 17,000 entries (5%) don't match the expected form (e.g., a 24-month form given to a 15-month-old). These could represent the calculated age (using effective_age) not reflecting the actual age in months. However, they could also represent clinical errors or off-label use in the EHR. The vast majority are one age-group off (e.g., 6 month vs 9 month). We will remove them to ensure validity.
 
 ```{r}
-qforms.swyc <- qforms.swyc[qforms.swyc$form_friendly_name == qforms.swyc$Form,]
+# For cases where a correct form has not been identified or is wrong, remove the entry
+qforms.swyc <- qforms.swyc %>% 
+                  filter(form_friendly_name == Form & !is.na(Form))
 ```
 
 Let's collect the scoring question for all SWYCs. These will serve as our official score sums for use in calculating clinical threshold.
@@ -306,7 +348,7 @@ ggplot(qforms.swyc.scores, aes(x = effective_age, y = pat_id, color = form_frien
         axis.ticks.y = element_blank()) +
   labs(x = "Effective Age (Days)", y = "Individual Patients", title = "Longitudinal SWYC Availability")
 
-dir.create("results/SWYC/", showWarnings = F)
+dir.create("results/SWYC/", showWarnings = F, recursive = T)
 ggsave("results/SWYC/swyc_ages.png")
 ```
 
@@ -473,14 +515,27 @@ sim_imperfect_response <- function(j, df) {
   return(calc_devo_age(df))
 
 }
+
+find_mode <- function(x) {
+  u <- unique(x)
+  tab <- tabulate(match(x,u))
+  u[tab == max(tab)][1]
+}
 ```
 
 ```{r}
 #| output: false
-rm(response_summary, qforms.swyc)
 gc()
-
+rm(response_profiles)
 library(parallel)
+
+# Load existing developmental age profiles if they exist
+if (file.exists("data/response_profiles.csv")) {
+  response_profiles <- read_csv("data/response_profiles.csv",
+                                show_col_types = FALSE,
+                                col_types = paste0(strrep("i", 50), strrep("d", 2))) %>%
+                          as.data.table()
+}
 
 if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
   qforms.swyc.indiv <- read_csv("results/SWYC/individual_development_scores.csv", 
@@ -496,14 +551,19 @@ if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
   
   # Reduce data table of question responses for efficiency
   qforms.swyc.questions <- lazy_dt(qforms.swyc.questions) %>%
-                                  select(encounter_id, form_friendly_name, norm.age, numeric_answer, 
+                                  select(encounter_id, form_friendly_name, norm.age,
+                                         numeric_answer, 
+                                         q_num = `SWYC Milestone question`,
                                          beta, alpha1, alpha2, starts_with("prob.")) %>%
                                   drop_na() %>%
                                   as.data.table()
   
+  q_nums <- as.character(sort(unique(qforms.swyc.questions$q_num)))
+  
   # Record QA data and check for boundary_conditions
   response_summary <- lazy_dt(qforms.swyc.questions) %>%
-                         dplyr::select(c(encounter_id,form_friendly_name, norm.age, numeric_answer)) %>%
+                         dplyr::select(c(encounter_id,form_friendly_name, 
+                                         norm.age, numeric_answer)) %>%
                          na.omit() %>%
                          group_by(encounter_id, form_friendly_name, norm.age) %>%
                          summarize(n_answers = n(),
@@ -521,24 +581,70 @@ if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
   it_max <- nrow(qforms.swyc.indiv)
 
   pb = txtProgressBar(min = 0, max = it_max, initial = 0, style = 3) 
-  
+  skipped_profiles <- 0
   for (i in 1:it_max) {
     # Subset data to include only rows that belong to the current patient visit
     qforms.ind <- lazy_dt(qforms.swyc.questions) %>%
                     filter(encounter_id       == qforms.swyc.indiv$encounter_id[i] &
                            form_friendly_name == qforms.swyc.indiv$form_friendly_name[i] &
                            norm.age           == qforms.swyc.indiv$norm.age[i]) %>%
-                    select(beta, alpha1, alpha2, starts_with("prob.")) %>%
+                    select(encounter_id, form_friendly_name, q_num, numeric_answer, 
+                           beta, alpha1, alpha2, starts_with("prob.")) %>%
                     as.data.table()
     
     # Skip encounters with insufficient data to estimate a curve
     if(nrow(qforms.ind) < 5) {
+      setTxtProgressBar(pb,i)
       next
-    # Resolve duplicates: take the form with the highest completion rate
-    } else if (length(qforms.ind$form_section_friendly_name) > 1) {
-      qforms.ind <- qforms.ind %>%
-                        filter(form_section_friendly_name == 
-                                names(which.max(table(form_section_friendly_name))))
+    }
+    
+    # If there are duplicate responses we can differentiate through encounter_id, 
+    # find the highest completion rate
+    if (length(unique(qforms.ind$encounter_id)) > 1) {
+      qforms.ind <- lazy_dt(qforms.ind) %>%
+                        filter(encounter_id ==
+                                names(which.max(table(encounter_id)))) %>%
+                        as.data.table()
+    }
+    
+    # If there are duplicate responses that we can't differentiate, take the mode of 
+    # the responses
+    if (nrow(qforms.ind) > nrow(distinct(qforms.ind[,c("form_friendly_name","q_num")]))) {
+      qforms.ind <- lazy_dt(qforms.ind) %>% 
+                      group_by(q_num) %>%
+                      filter(numeric_answer == find_mode(numeric_answer)) %>%
+                      ungroup() %>%
+                      distinct() %>%
+                      as.data.table()
+    }
+    
+    
+    # Generate a response profile to check against existing response profiles
+    response_profile <- qforms.ind %>% 
+                          select(q_num, numeric_answer) %>%
+                          mutate(q_num = factor(q_num, levels = q_nums)) %>%
+                          pivot_wider(names_from = q_num, 
+                                      values_from = numeric_answer,
+                                      names_expand = TRUE) %>%
+                          as.data.table()
+    
+    # Check if a developmental age profile already exists
+    if (exists("response_profiles")) {
+      # response_match <- semi_join(response_profiles, response_profile, by = q_nums)
+      # Find the row indices in response_profiles that have a match
+      idx <- response_profiles[response_profile, on = q_nums, which = TRUE, nomatch = NULL]
+      
+      # Subset the table using unique indices to prevent duplication
+      response_match <- response_profiles[unique(idx)]
+      if (nrow(response_match) == 1) {
+        skipped_profiles <- skipped_profiles + 1
+        # If the response profile already exists, skip generating devo age
+        # and reuse the existing devo age
+        qforms.swyc.indiv$devo.age[i] <- response_match$devo.age[1]
+        qforms.swyc.indiv$devo.prob[i] <- response_match$devo.prob[1]
+        setTxtProgressBar(pb,i)
+        next
+      }
     }
     
     # Standard Maximum Likelihood Estimation
@@ -567,6 +673,17 @@ if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
         qforms.swyc.indiv$devo.prob[i] <- sim_responses["devo.prob",max.ind]$devo.prob
       }
     }
+    if (!exists("response_profiles")) {
+      response_profiles <- response_profile %>%
+                                mutate(devo.age = res$devo.age,
+                                       devo.prob = res$devo.prob)
+    } else {
+      response_profiles <- bind_rows(response_profiles,
+                                     response_profile %>%
+                                        mutate(devo.age = res$devo.age,
+                                       devo.prob = res$devo.prob))
+      
+    }
 
     setTxtProgressBar(pb,i)
   }
@@ -578,6 +695,12 @@ if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
   
   write_csv(qforms.swyc.indiv,"results/SWYC/individual_development_scores.csv")
 }
+```
+
+```{r}
+print(glue("Processed {nrow(qforms.swyc.indiv)} duplicate response profiles"))
+print(glue("Skipped {skipped_profiles} duplicate response profiles"))
+write_csv(response_profiles, "data/response_profiles.csv")
 ```
 
 ## Formatting
@@ -683,15 +806,17 @@ ggplot(qforms.swyc.indiv, aes(x = age_mo, y = devo.quotient, group = pat_id, col
   labs(title = "Longitudinal Developmental Quotient Trajectories", x = "Age (Months)", y = "DQ")
 ```
 
-# Save
+## Save to CSV
 
 ```{r}
 write_csv(qforms.swyc.indiv,"results/SWYC/swyc_normative_scores.csv")
 ```
 
-# Upload To Arcus
+## Upload To Arcus
 
 Push the fully cleaned and processed normative scores back into the BigQuery lab space.
+
+Note: By default, upload is set to false and a table will not be uploaded. Additionally the date will be appended to the table, and so versions of this pipeline that were run on previous days will not be overwritten.
 
 ```{r}
 # Clean up table naming conventions for BigQuery schema compliance
@@ -714,26 +839,43 @@ colnames(df_swyc) <- str_replace_all(colnames(df_swyc),"\\.","_")
 ```
 
 ```{r}
-# Define target table
-bq_swyc <- bq_table(project_id,"lab",paste0("swyc_normative_scores_",Sys.Date()))
 
-# Refresh the table if it already exists
-if (bq_table_exists(bq_swyc)) {
-  bq_table_delete(bq_swyc)
+upload = F
+
+if (upload) {
+  # Define target table
+  bq_swyc <- bq_table(project_id,"lab",paste0("swyc_normative_scores_",
+                                              str_replace_all(Sys.Date(),"-","_")))
+  
+  # Refresh the table if it already exists
+  if (bq_table_exists(bq_swyc)) {
+    bq_table_delete(bq_swyc)
+  }
+  
+  # Apply metadata to the table for data governance and reproducibility
+  bq_table_create(
+    bq_swyc,
+    fields = df_swyc,
+    friendly_name = "SWYC Normative Scores",
+    description = "These data contain summarized and normative scores for the developmental milestones portion of the Survey of Well-being in Young Children. Normative scores were generated as described Sheldrick et al., 2019. NOTE: Prematurity is NOT factored into the normative scores. prematurity_adj_age is calculated for the traditional interpretation of the SWYC and, consistent with that, only adjusts for prematurity up to 24 months after birth."
+  )
+  
+  bq_table_exists(bq_swyc)
+  
+  # Execute upload
+  bq_table_upload(bq_swyc, df_swyc)
+  
+  bq_table_fields(bq_swyc)
 }
 
-# Apply metadata to the table for data governance and reproducibility
-bq_table_create(
-  bq_swyc,
-  fields = df_swyc,
-  friendly_name = "SWYC Normative Scores",
-  description = "These data contain summarized and normative scores for the developmental milestones portion of the Survey of Well-being in Young Children. Normative scores were generated as described Sheldrick et al., 2019. NOTE: Prematurity is NOT factored into the normative scores. prematurity_adj_age is calculated for the traditional interpretation of the SWYC and, consistent with that, only adjusts for prematurity up to 24 months after birth."
-)
-
-bq_table_exists(bq_swyc)
-
-# Execute upload
-bq_table_upload(bq_swyc, df_swyc)
-
-bq_table_fields(bq_swyc)
 ```
+
+## Time Check
+
+```{r}
+paste0("Processing completed in ", round(difftime(Sys.time(), pipeline_start, units = "mins"),2), " minutes")
+```
+
+## Acknowledgements
+
+Thanks to Jamie Catalano and Eren Kafadar for code review and improvements.
