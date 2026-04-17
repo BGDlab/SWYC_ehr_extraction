@@ -91,12 +91,9 @@ The SWYC assess developmental milestones across multiple cognitive domains. In t
 subdomain <- "" 
 # Specify parameters
 if (subdomain == "" | subdomain == "all") {
-  sheldrick_norms <- sheldrick_norms[!is.na(sheldrick_norms$`SWYC Milestone Text`),]
   q_thresh <- 5
   out <- "SWYC"
 } else {
-  sheldrick_norms <- read_csv("data/SWYC_norms/Sheldrick_et_al_2019_norms.csv", 
-                              show_col_types = FALSE)
   q_thresh <- 3
   out <- subdomain
 }
