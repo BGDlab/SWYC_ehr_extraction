@@ -54,7 +54,7 @@ library(dtplyr)
 ```{r}
 library(bigrquery)
 bq_auth()
-project_id <- if (exists('project_id')) project_id else bq_projects()[1]
+project_id <- "scit605-healthymri-2d73d69f"
 ```
 
 ```{r identify Arcus lab version}
@@ -80,6 +80,27 @@ if (is.character(enc_file)) {
   encs <- read_csv(file=enc_file)
   dim(encs)
 }
+```
+
+## SWYC Domain Subsetting (Optional, Experimental, Not Validated)
+
+The SWYC assess developmental milestones across multiple cognitive domains. In theory, the SWYC developmental quotient calculation does not require all 10 responses and can generate a DQ using a subset of questions. Therefore, it may be possible to subdivide the SWYC questions into subdomains and calculate domain specific DQ. This is not validated and not recommended. The current specified domains are LLM-generated and meant to be used as placeholders. TESTING ONLY.
+
+```{r}
+#Specify one of: blank, all, motor, social_cognitive, language_communication
+subdomain <- "" 
+# Specify parameters
+if (subdomain == "" | subdomain == "all") {
+  sheldrick_norms <- sheldrick_norms[!is.na(sheldrick_norms$`SWYC Milestone Text`),]
+  q_thresh <- 5
+  out <- "SWYC"
+} else {
+  sheldrick_norms <- read_csv("data/SWYC_norms/Sheldrick_et_al_2019_norms.csv", 
+                              show_col_types = FALSE)
+  q_thresh <- 3
+  out <- subdomain
+}
+dir.create(file.path("results", out), showWarnings = F, recursive = T)
 ```
 
 ## Download and Clean SWYC Codes
@@ -210,15 +231,12 @@ qforms.swyc <- qforms.swyc %>%
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
                               "Developmental Milestones (15|16) Month",
                               "Developmental Milestones: 15 Month")) %>% 
-        # JLC added 20 and 21
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
                               "Developmental Milestones (17|18|19|20|21|22) Month",
                               "Developmental Milestones: 18 Month")) %>%  
-        # JLC added 23,25,27
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
                               "Developmental Milestones (23|24|25|26|27) Month",
                               "Developmental Milestones: 24 Month")) %>% 
-        # JLC added 31 and 33
         mutate(form_friendly_name = str_replace_all(form_friendly_name, 
                               "Developmental Milestones (29|30|31|32|33|34) Month",
                               "Developmental Milestones: 30 Month")) %>% 
@@ -348,8 +366,7 @@ ggplot(qforms.swyc.scores, aes(x = effective_age, y = pat_id, color = form_frien
         axis.ticks.y = element_blank()) +
   labs(x = "Effective Age (Days)", y = "Individual Patients", title = "Longitudinal SWYC Availability")
 
-dir.create("results/SWYC/", showWarnings = F, recursive = T)
-ggsave("results/SWYC/swyc_ages.png")
+ggsave(file.path("results",out,"swyc_ages.png"))
 ```
 
 ## Estimate SWYC Severity Approach 1 (Clinical Thresholds)
@@ -422,7 +439,7 @@ qforms.swyc.questions <- qforms.swyc %>%
         filter(!grepl("PLEASE BE SURE",toupper(quest_text))) %>%
         drop_na(numeric_answer)
 
-write_csv(qforms.swyc.questions, "results/SWYC/SWYC_questions.csv")
+write_csv(qforms.swyc.questions, file.path("results",out,"SWYC_questions.csv"))
 ```
 
 ```{r}
@@ -442,7 +459,16 @@ This file contains normative parameters ($\alpha_1$, $\alpha_2$, and $\beta$) fo
 
 ```{r}
 # Load Sheldrick norms
-sheldrick_norms <- read_csv("data/SWYC_norms/Sheldrick_et_al_2019_norms.csv", show_col_types = FALSE)
+if (subdomain == "" | subdomain == "all") {
+  sheldrick_norms <- read_csv("data/SWYC_norms/Sheldrick_et_al_2019_norms.csv", 
+                              show_col_types = FALSE)
+} else {
+  sheldrick_norms <- read_csv("data/SWYC_norms/swyc_multidomain.csv", 
+                              show_col_types = FALSE)  %>% 
+                          filter(!!sym(subdomain) == 1) %>%
+                          select(-c(language_communication:n_domains))
+}
+
 sheldrick_norms <- sheldrick_norms[!is.na(sheldrick_norms$`SWYC Milestone Text`),]
 
 # Merge the IRT parameters onto the patient responses based on the question text
@@ -536,9 +562,9 @@ if (file.exists("data/response_profiles.csv")) {
                                 col_types = paste0(strrep("i", 50), strrep("d", 2))) %>%
                           as.data.table()
 }
-
-if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
-  qforms.swyc.indiv <- read_csv("results/SWYC/individual_development_scores.csv", 
+devo_scores_file <- file.path("results",out,"individual_development_scores.csv")
+if (file.exists(devo_scores_file) & !restart) {
+  qforms.swyc.indiv <- read_csv(devo_scores_file, 
                                 show_col_types = FALSE)
 } else {
   # Get data table of subjects
@@ -562,14 +588,15 @@ if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
   
   # Record QA data and check for boundary_conditions
   response_summary <- lazy_dt(qforms.swyc.questions) %>%
-                         dplyr::select(c(encounter_id,form_friendly_name, 
+                         dplyr::select(c(encounter_id,form_friendly_name,
                                          norm.age, numeric_answer)) %>%
                          na.omit() %>%
                          group_by(encounter_id, form_friendly_name, norm.age) %>%
-                         summarize(n_answers = n(),
+                         summarize(n_answers_orig = n(),
                                 all_0s = all(numeric_answer == 0),
                                 all_2s = all(numeric_answer == 2),
                                 sum_answers = sum(numeric_answer)) %>%
+                        mutate(n_answers_filtered = n_answers_orig) %>%
                         as.data.table()
   
   qforms.swyc.indiv <- lazy_dt(qforms.swyc.indiv) %>%
@@ -591,12 +618,7 @@ if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
                     select(encounter_id, form_friendly_name, q_num, numeric_answer, 
                            beta, alpha1, alpha2, starts_with("prob.")) %>%
                     as.data.table()
-    
-    # Skip encounters with insufficient data to estimate a curve
-    if(nrow(qforms.ind) < 5) {
-      setTxtProgressBar(pb,i)
-      next
-    }
+
     
     # If there are duplicate responses we can differentiate through encounter_id, 
     # find the highest completion rate
@@ -605,6 +627,10 @@ if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
                         filter(encounter_id ==
                                 names(which.max(table(encounter_id)))) %>%
                         as.data.table()
+      qforms.swyc.indiv$n_answers_filtered[i] <- nrow(qforms.ind)
+      qforms.swyc.indiv$all_0s[i] <- all(qforms.ind == 0)
+      qforms.swyc.indiv$all_2s[i] <- all(qforms.ind == 2)
+      qforms.swyc.indiv$sum_answers[i] <- sum(qforms.ind$numeric_answer, na.rm = T)
     }
     
     # If there are duplicate responses that we can't differentiate, take the mode of 
@@ -616,8 +642,17 @@ if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
                       ungroup() %>%
                       distinct() %>%
                       as.data.table()
+      qforms.swyc.indiv$n_answers_filtered[i] <- nrow(qforms.ind)
+      qforms.swyc.indiv$all_0s[i] <- all(qforms.ind == 0)
+      qforms.swyc.indiv$all_2s[i] <- all(qforms.ind == 2)
+      qforms.swyc.indiv$sum_answers[i] <- sum(qforms.ind$numeric_answer, na.rm = T)
     }
     
+    # Skip encounters with insufficient data to estimate a curve
+    if(nrow(qforms.ind) < q_thresh) {
+      setTxtProgressBar(pb,i)
+      next
+    }    
     
     # Generate a response profile to check against existing response profiles
     response_profile <- qforms.ind %>% 
@@ -693,13 +728,10 @@ if (file.exists("results/SWYC/individual_development_scores.csv") & !restart) {
                           mutate(devo.quotient = devo.age/norm.age) %>%
                           as_tibble()
   
-  write_csv(qforms.swyc.indiv,"results/SWYC/individual_development_scores.csv")
+  write_csv(qforms.swyc.indiv, file.path("results",out,"individual_development_scores.csv"))
 }
-```
 
-```{r}
-print(glue("Processed {nrow(qforms.swyc.indiv)} duplicate response profiles"))
-print(glue("Skipped {skipped_profiles} duplicate response profiles"))
+print(paste0("Reused response profiles for ", skipped_profiles," rows"))
 write_csv(response_profiles, "data/response_profiles.csv")
 ```
 
@@ -727,7 +759,7 @@ qforms.swyc.indiv <- qforms.swyc.indiv %>%
                              gestational_age_num, 
                              weeks_premature,
                              SWYC.form_friendly_name = form_friendly_name, 
-                             SWYC.n_answers = n_answers,
+                             SWYC.n_answers = n_answers_filtered,
                              SWYC.sum_answers = sum_answers,
                              SWYC.count.score = numeric_answer, 
                              SWYC.all_0s = all_0s, SWYC.all_2s = all_2s,
@@ -737,7 +769,7 @@ qforms.swyc.indiv <- qforms.swyc.indiv %>%
                              birth_weight_kg, .after = encounter_id) %>%
                           dplyr::select(c(pat_id:birth_weight_kg)) %>%
                           # Ensure validity: must have >=5 answers and match the age form
-                          filter(SWYC.n_answers >= 5,
+                          filter(SWYC.n_answers >= q_thresh,
                                  clin.matches_expected_swyc)
 ```
 
@@ -753,13 +785,13 @@ ggplot(qforms.swyc.indiv, aes(x = devo.age)) +
   geom_density() +
   theme_pubclean()
   labs(title = "Distribution of Computed Developmental Age")
-ggsave("results/SWYC/development_age.png")
+ggsave(file.path("results",out,"development_age.png"))
 
 ggplot(qforms.swyc.indiv, aes(x = devo.prob)) +
   geom_histogram() +
   geom_density() +
   theme_pubclean()
-ggsave("results/SWYC/development_prob.png")
+ggsave(file.path("results",out,"development_prob.png"))
 
 ggplot(qforms.swyc.indiv, aes(x = devo.quotient)) +
   geom_histogram() +
@@ -767,7 +799,7 @@ ggplot(qforms.swyc.indiv, aes(x = devo.quotient)) +
              linetype = "dashed", color = "red") +
   theme_pubclean() +
   labs(title = "Distribution of Developmental Quotient (DQ)")
-ggsave("results/SWYC/development_quotient.png")
+ggsave(file.path("results",out,"development_quotient.png"))
 ```
 
 The devo.quotient is below 1 (mean = 0.9), but I suppose that is to be expected in a cohort composed entirely of young children with brain MRIs.
@@ -782,14 +814,14 @@ ggplot(qforms.swyc.indiv, aes(x = age_mo, y = devo.age)) +
   geom_smooth(method = "lm") +
   theme_pubclean() + 
   facet_wrap(~ SWYC.form_friendly_name, ncol = 3, scales = "free")
-ggsave("results/SWYC/swyc_vs_devo_age.png")
+ggsave(file.path("results",out,"swyc_vs_devo_age.png"))
 
 ggplot(qforms.swyc.indiv, aes(x = age_mo, y = devo.quotient)) +
   geom_point(alpha = 0.5) +
   geom_smooth(method = "lm") +
   theme_pubclean() + 
   facet_wrap(~ SWYC.form_friendly_name, ncol = 3, scales = "free_x")
-ggsave("results/SWYC/swyc_vs_dq.png")
+ggsave(file.path("results",out,"swyc_vs_dq.png"))
 ```
 
 Developmental ages are relatively flat with actual age and developmental quotient tends to decrease with age within the same assessments. We'd expect developmental age to increase with actual age, and we'd expect developmental quotient to remain relatively flat. Perhaps this reflects ascertainment bias. Individuals with assessments closer to the age threshold may reflect regular wellness assessments, whereas later assessments may reflect physicians suspecting developmental delay.
@@ -809,7 +841,7 @@ ggplot(qforms.swyc.indiv, aes(x = age_mo, y = devo.quotient, group = pat_id, col
 ## Save to CSV
 
 ```{r}
-write_csv(qforms.swyc.indiv,"results/SWYC/swyc_normative_scores.csv")
+write_csv(qforms.swyc.indiv,file.path("results",out,"swyc_normative_scores.csv"))
 ```
 
 ## Upload To Arcus

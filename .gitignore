@@ -5,3 +5,4 @@ queries/*
 defunct/
 .ipynb_checkpoints/
 *.pdf
+test_sample.csv
